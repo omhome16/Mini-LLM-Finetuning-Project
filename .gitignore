@@ -1,0 +1,25 @@
+# Virtual environment
+llama/
+.llama/
+
+# PyTorch
+*.pt
+*.pth
+
+# IDE files
+.vscode/
+.idea/
+
+# Data
+data/processed/
+data/checkpoints/
+
+# Byte-compiled files
+__pycache__/
+*.pyc
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+
+# Logs and temp files
+*.log
