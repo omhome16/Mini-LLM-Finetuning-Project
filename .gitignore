@@ -1,6 +1,6 @@
 # Virtual environment
-llama/
-.llama/
+llm-scratch/
+.llm-scratch/
 
 # PyTorch
 *.pt

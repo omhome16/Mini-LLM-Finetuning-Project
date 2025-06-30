@@ -1,4 +1,31 @@
+# decoder block
+
 import torch.nn as nn
+
+"""
+llama 3.1 8b config
+
+    vocab_size: int = 128256
+    hidden_size: int = 4096
+    intermediate_size: int = 14336
+    num_hidden_layers: int = 32
+    num_attention_heads: int = 32
+    num_key_value_heads: int = 8  # Grouped-Query Attention (GQA)
+    rms_norm_eps: float = 1e-5
+    rope_theta: float = 500000.0
+    max_position_embeddings: int = 131072
+    pad_token_id: int = 128255 # Corresponds to <|eot_id|>
+    bos_token_id: int = 128000
+    eos_token_id: int = 128001
+    
+"""
+
+class RMSNorm(nn.Module):
+
+
+
+
+
 
 class MultiHeadAttention (nn.Module):
     def __init__(self, hidden_size, num_heads, num_kv_heads,  rope_theta=10000):
