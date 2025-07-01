@@ -84,3 +84,179 @@ class RoPE(nn.Module):
         return (x * cos) + (x_rotated * sin)
 
 
+class MultiHeadAttention(nn.Module):
+    """
+    Implements standard Multi-Head Attention (MHA).
+    """
+    def __init__(self, config: ModelArgs):
+        """Initializes the MHA layer."""
+        super().__init__()
+        self.dim = config.dim
+        self.n_heads = config.n_heads
+        self.head_dim = self.dim // self.n_heads
+
+        # Linear projections for Query, Key, and Value
+        self.q_proj = nn.Linear(self.dim, self.n_heads * self.head_dim, bias=False)
+        self.k_proj = nn.Linear(self.dim, self.n_heads * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(self.dim, self.n_heads * self.head_dim, bias=False)
+        self.o_proj = nn.Linear(self.n_heads * self.head_dim, self.dim, bias=False)
+
+        # Positional encoding
+        self.rope = RoPE(self.head_dim, rope_theta=config.rope_theta)
+
+    def forward(self, hidden_states: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Args:
+            hidden_states (torch.Tensor): Input tensor of shape (B, S, D).
+            attention_mask (torch.Tensor, optional): Mask for padding.
+        """
+        batch_size, seq_len, _ = hidden_states.shape
+
+        # Project to Q, K, V and reshape for heads
+        queries = self.q_proj(hidden_states).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)  # (B, H, S, D_h)
+        keys = self.k_proj(hidden_states).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)  # (B, H, S, D_h)
+        values = self.v_proj(hidden_states).view(batch_size, seq_len, self.n_heads, self.head_dim).transpose(1, 2)  # (B, H, S, D_h)
+
+        # Apply RoPE to Queries and Keys
+        queries = self.rope(queries, seq_len)
+        keys = self.rope(keys, seq_len)
+
+        # Scaled Dot-Product Attention
+        scores = torch.matmul(queries, keys.transpose(-2, -1)) / math.sqrt(self.head_dim)
+
+        # Apply causal mask and padding mask
+        # Create a causal mask (lower triangular)
+        causal_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool, device=scores.device), diagonal=1)
+        scores.masked_fill_(causal_mask, float('-inf'))
+
+        if attention_mask is not None:
+            # Expand mask to be broadcastable for the heads and sequence
+            attention_mask = attention_mask[:, None, None, :].masked_fill(attention_mask[:, None, None, :]==0, float('-inf'))
+            scores += attention_mask
+
+        # Softmax and output projection
+        attention_weights = F.softmax(scores.float(), dim=-1).type_as(scores)
+        output = torch.matmul(attention_weights, values)
+
+        # Reshape to original dimensions
+        output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, self.dim)
+        output = self.o_proj(output)
+
+        return output
+
+
+class FeedForward(nn.Module):
+    """
+    Implements the Feed-Forward Network with GeLU activation, as used in Pythia.
+    """
+
+    def __init__(self, config: ModelArgs):
+        """Initializes the FFN layer."""
+        super().__init__()
+        self.dim = config.dim
+        # Pythia FFN is 4x the hidden dim
+        self.hidden_dim = self.dim * 4
+
+        # Linear layers for the FFN
+        self.fc1 = nn.Linear(self.dim, self.hidden_dim, bias=True)
+        self.fc2 = nn.Linear(self.hidden_dim, self.dim, bias=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Applies the FFN to the input tensor."""
+        # Apply first linear layer, GeLU activation, and second linear layer
+        return self.fc2(F.gelu(self.fc1(x)))
+
+
+class DecoderBlock(nn.Module):
+    """A single Transformer Decoder Block."""
+
+    def __init__(self, config: ModelArgs):
+        """Initializes the Decoder Block."""
+        super().__init__()
+        self.dim = config.dim
+
+        self.attention_norm = RMSNorm(config.dim, eps=config.norm_eps)
+        self.attention = MultiHeadAttention(config)
+
+        self.ffn_norm = RMSNorm(config.dim, eps=config.norm_eps)
+        self.feed_forward = FeedForward(config)
+
+    def forward(self, hidden_states: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Forward pass for the Decoder Block.
+        """
+        # --- Attention with residual connection ---
+        norm_hidden_states = self.attention_norm(hidden_states)
+        attn_output = self.attention(norm_hidden_states, attention_mask=attention_mask)
+        hidden_states = hidden_states + attn_output  # Residual connection
+
+        # --- Feed-Forward with residual connection ---
+        norm_hidden_states = self.ffn_norm(hidden_states)
+        ffn_output = self.feed_forward(norm_hidden_states)
+        hidden_states = hidden_states + ffn_output  # Residual connection
+
+        return hidden_states
+
+
+class CausalLM(nn.Module):
+    """
+    The main Causal Language Model.
+    """
+
+    def __init__(self, config: ModelArgs):
+        """Initializes the full model."""
+        super().__init__()
+        self.config = config
+
+        # Token embeddings
+        self.embedding = nn.Embedding(config.vocab_size, config.dim)
+
+        # Stack of Decoder Blocks
+        self.decoder_blocks = nn.ModuleList(
+            [DecoderBlock(config) for _ in range(config.n_layers)]
+        )
+
+        # Final RMS Norm layer
+        self.final_norm = RMSNorm(config.dim, eps=config.norm_eps)
+
+        # Language modeling head
+        self.lm_head = nn.Linear(config.dim, config.vocab_size, bias=False)
+
+        # Tie weights
+        self.lm_head.weight = self.embedding.weight
+
+    def forward(
+            self,
+            input_ids: torch.Tensor,
+            attention_mask: Optional[torch.Tensor] = None,
+            labels: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Forward pass for the model.
+        Args:
+            input_ids (torch.Tensor): Input token IDs of shape (B, S).
+            attention_mask (torch.Tensor, optional): Mask for padding tokens.
+            labels (torch.Tensor, optional): Labels for computing the loss.
+
+        Returns:
+            Tuple[torch.Tensor, Optional[torch.Tensor]]: Logits and loss.
+        """
+        hidden_states = self.embedding(input_ids)
+
+        for layer in self.decoder_blocks:
+            hidden_states = layer(hidden_states, attention_mask=attention_mask)
+
+        hidden_states = self.final_norm(hidden_states)
+        logits = self.lm_head(hidden_states)
+
+        loss = None
+        if labels is not None:
+            # Shift logits and labels for language modeling loss
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+
+            # Cross-entropy loss
+            loss_fct = nn.CrossEntropyLoss()
+            loss = loss_fct(shift_logits.view(-1, self.config.vocab_size), shift_labels.view(-1))
+
+        return logits, loss
