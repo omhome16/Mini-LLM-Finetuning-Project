@@ -18,28 +18,16 @@ def train_model(
         device: str,
         checkpoint_dir: str = 'checkpoints'
 ):
-    """
-    The main training loop for instruction fine-tuning.
 
-    Args:
-        model (nn.Module): The model to train.
-        train_dataloader (DataLoader): DataLoader for the training data.
-        epochs (int): Number of training epochs.
-        lr (float): Learning rate.
-        device (str): Device to train on ('cuda' or 'cpu').
-        checkpoint_dir (str): Directory to save model checkpoints.
-    """
     model.train()
     model.to(device)
 
-    # Optimizer and Learning Rate Scheduler
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
 
-    # Simple linear scheduler with a warmup phase
     total_steps = len(train_dataloader) * epochs
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
-        num_warmup_steps=int(0.1 * total_steps),  # 10% warmup
+        num_warmup_steps=int(0.1 * total_steps),
         num_training_steps=total_steps
     )
 
@@ -56,14 +44,9 @@ def train_model(
             attention_mask = batch['attention_mask'].to(device)
             labels = batch['labels'].to(device)
 
-            # Forward pass
             _, loss = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
 
-            # Backward pass and optimization
             loss.backward()
-
-            # Gradient accumulation (optional, but good for larger models)
-            # You can add logic here if you need to simulate a larger batch size.
 
             optimizer.step()
             scheduler.step()
@@ -76,7 +59,6 @@ def train_model(
         avg_loss = total_loss / len(train_dataloader)
         print(f"\n--- Epoch {epoch + 1} finished. Average Loss: {avg_loss:.4f} ---")
 
-        # Save checkpoint
         checkpoint_path = os.path.join(checkpoint_dir, f'model_epoch_{epoch + 1}.pt')
         torch.save({
             'epoch': epoch + 1,
